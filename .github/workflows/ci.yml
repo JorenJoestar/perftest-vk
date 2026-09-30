@@ -1,0 +1,55 @@
+# Build, compile the shaders with pinned Slang and DXC, and run on lavapipe (Mesa's CPU Vulkan driver):
+# --verify checks the results of the bindless suite, and a short timing run of
+# every suite checks that nothing trips the validation layer (synchronization validation included).
+# Times on lavapipe are meaningless: this is a functional test.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  SLANG_VERSION: "2026.12"
+  DXC_RELEASE: "v1.8.2505"
+  DXC_ARCHIVE: "linux_dxc_2025_05_24.x86_64.tar.gz"
+
+jobs:
+  lavapipe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vulkan loader, lavapipe, validation layer, SPIR-V tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers vulkan-validationlayers spirv-tools
+
+      - name: Install Slang and DXC
+        run: |
+          mkdir -p "$HOME/tools/slang" "$HOME/tools/dxc"
+          curl -sSL "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-linux-x86_64.tar.gz" | tar xz -C "$HOME/tools/slang"
+          curl -sSL "https://github.com/microsoft/DirectXShaderCompiler/releases/download/${DXC_RELEASE}/${DXC_ARCHIVE}" | tar xz -C "$HOME/tools/dxc"
+          "$HOME/tools/slang/bin/slangc" -version
+          "$HOME/tools/dxc/bin/dxc" --version
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+                -DSLANGC_EXECUTABLE="$HOME/tools/slang/bin/slangc" \
+                -DDXC_EXECUTABLE="$HOME/tools/dxc/bin/dxc" \
+                -DPERFTEST_SHADERS_GLSLANG=OFF
+          cmake --build build -j
+
+      - name: Verify and validate on lavapipe
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          VK_KHRONOS_VALIDATION_VALIDATE_SYNC: "1"
+        run: |
+          for compiler in slang dxc; do
+            echo "::group::$compiler --verify"
+            ./build/perftest-vk --shaders build/shaders/$compiler --verify --validation
+            echo "::endgroup::"
+            echo "::group::$compiler short timing run, all suites"
+            ./build/perftest-vk --shaders build/shaders/$compiler --frames 1 --warmup 1 --groups 1 64 --validation
+            echo "::endgroup::"
+          done
